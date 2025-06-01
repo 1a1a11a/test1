@@ -272,17 +272,43 @@ class SyncManager:
         self.sync_queue.put((100 - priority, operation))
         logger.debug(f"Queued delete: {virtual_path}")
     
-    def download_file(self, path: str) -> bool:
+    def download_file(self, path: str, timeout: float = 30.0) -> bool:
         """Download file immediately (synchronous).
         
         Args:
             path: Virtual file path
+            timeout: Maximum time to wait for download
             
         Returns:
             True if successful, False otherwise
         """
-        with self.sync_lock:
-            return self._download_file(path)
+        import threading
+        import time
+        
+        result = [False]  # Use list to allow modification in nested function
+        exception = [None]
+        
+        def download_worker():
+            try:
+                with self.sync_lock:
+                    result[0] = self._download_file(path)
+            except Exception as e:
+                exception[0] = e
+        
+        # Run download in separate thread with timeout
+        thread = threading.Thread(target=download_worker, daemon=True)
+        thread.start()
+        thread.join(timeout=timeout)
+        
+        if thread.is_alive():
+            logger.warning(f"Download timeout for {path} after {timeout}s")
+            return False
+        
+        if exception[0]:
+            logger.error(f"Download error for {path}: {exception[0]}")
+            return False
+        
+        return result[0]
     
     def upload_file(self, path: str) -> bool:
         """Upload file immediately (synchronous).

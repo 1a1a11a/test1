@@ -188,12 +188,35 @@ class ShareBoxFS(Operations):
         try:
             cache_path = self._get_cache_path(path)
             
-            # Download file if it doesn't exist in cache
+            # Download file if it doesn't exist in cache (with timeout)
             if not os.path.exists(cache_path):
-                self.sync_manager.download_file(path)
+                logger.debug(f"Cache miss for {path}, attempting download")
+                # Try to download but don't block forever
+                try:
+                    success = self.sync_manager.download_file(path)
+                    if not success:
+                        logger.warning(f"Failed to download {path}, may be a new file")
+                except Exception as e:
+                    logger.warning(f"Download failed for {path}: {e}")
+                    # Continue anyway - might be a new file being created
             
-            # Open file
-            fd = os.open(cache_path, flags)
+            # Try to open file, create if it doesn't exist and we're writing
+            try:
+                if os.path.exists(cache_path):
+                    fd = os.open(cache_path, flags)
+                elif flags & (os.O_WRONLY | os.O_RDWR | os.O_CREAT):
+                    # Create file if we're writing and it doesn't exist
+                    self._ensure_cache_dir(path)
+                    fd = os.open(cache_path, flags | os.O_CREAT, 0o644)
+                else:
+                    # File doesn't exist and we're not creating it
+                    raise FuseOSError(errno.ENOENT)
+            except OSError as e:
+                if e.errno == errno.ENOENT:
+                    raise FuseOSError(errno.ENOENT)
+                else:
+                    logger.error(f"OS error opening {path}: {e}")
+                    raise FuseOSError(errno.EIO)
             
             # Store file descriptor info
             with self.lock:
@@ -207,11 +230,14 @@ class ShareBoxFS(Operations):
                     'dirty': False
                 }
             
-            logger.debug(f"Opened file: {path}")
+            logger.debug(f"Opened file: {path} (fd={fh})")
             return fh
             
+        except FuseOSError:
+            # Re-raise FUSE errors
+            raise
         except Exception as e:
-            logger.error(f"Error opening file {path}: {e}")
+            logger.error(f"Unexpected error opening file {path}: {e}")
             raise FuseOSError(errno.EIO)
     
     def read(self, path, length, offset, fh):
@@ -238,20 +264,41 @@ class ShareBoxFS(Operations):
     def write(self, path, buf, offset, fh):
         """Write to a file."""
         try:
-            if fh in self.open_files:
-                fd = self.open_files[fh]['fd']
+            if fh not in self.open_files:
+                raise FuseOSError(errno.EBADF)
+            
+            fd = self.open_files[fh]['fd']
+            
+            # Perform the write operation
+            try:
                 os.lseek(fd, offset, os.SEEK_SET)
                 written = os.write(fd, buf)
                 
-                # Mark file as dirty for sync
+                # Mark file as dirty for sync (non-blocking)
                 self.open_files[fh]['dirty'] = True
                 
+                # Log write progress for large files
+                if len(buf) > 1024 * 1024:  # > 1MB
+                    logger.debug(f"Wrote {len(buf)} bytes to {path} at offset {offset}")
+                
                 return written
+                
+            except OSError as e:
+                if e.errno == errno.ENOSPC:
+                    logger.error(f"No space left on device for {path}")
+                    raise FuseOSError(errno.ENOSPC)
+                elif e.errno == errno.EIO:
+                    logger.error(f"I/O error writing to {path}")
+                    raise FuseOSError(errno.EIO)
+                else:
+                    logger.error(f"OS error writing to {path}: {e}")
+                    raise FuseOSError(errno.EIO)
             
-            raise FuseOSError(errno.EBADF)
-            
+        except FuseOSError:
+            # Re-raise FUSE errors
+            raise
         except Exception as e:
-            logger.error(f"Error writing to file {path}: {e}")
+            logger.error(f"Unexpected error writing to file {path}: {e}")
             raise FuseOSError(errno.EIO)
     
     def flush(self, path, fh):
@@ -261,14 +308,17 @@ class ShareBoxFS(Operations):
                 fd = self.open_files[fh]['fd']
                 os.fsync(fd)
                 
-                # Trigger sync if file is dirty
+                # Trigger async sync if file is dirty
                 if self.open_files[fh]['dirty']:
+                    # Queue for upload but don't wait - this prevents blocking
                     self.sync_manager.queue_upload(path)
                     self.open_files[fh]['dirty'] = False
+                    logger.debug(f"Queued upload for {path}")
             
         except Exception as e:
             logger.error(f"Error flushing file {path}: {e}")
-            raise FuseOSError(errno.EIO)
+            # Don't raise error for flush - it should be non-blocking
+            pass
     
     def release(self, path, fh):
         """Close a file."""
@@ -277,23 +327,33 @@ class ShareBoxFS(Operations):
                 file_info = self.open_files[fh]
                 fd = file_info['fd']
                 
-                # Sync file if dirty
+                # Sync file if dirty (async)
                 if file_info['dirty']:
-                    os.fsync(fd)
-                    self.sync_manager.queue_upload(path)
+                    try:
+                        os.fsync(fd)
+                        # Queue for async upload - don't block on this
+                        self.sync_manager.queue_upload(path)
+                        logger.debug(f"Queued upload on release for {path}")
+                    except Exception as e:
+                        logger.warning(f"Failed to sync file {path} on release: {e}")
                 
                 # Close file descriptor
-                os.close(fd)
+                try:
+                    os.close(fd)
+                except OSError as e:
+                    logger.warning(f"Error closing file descriptor for {path}: {e}")
                 
                 # Remove from open files
                 with self.lock:
-                    del self.open_files[fh]
+                    if fh in self.open_files:
+                        del self.open_files[fh]
                 
                 logger.debug(f"Released file: {path}")
             
         except Exception as e:
             logger.error(f"Error releasing file {path}: {e}")
-            raise FuseOSError(errno.EIO)
+            # Don't raise error for release - it should complete gracefully
+            pass
     
     def unlink(self, path):
         """Delete a file."""
