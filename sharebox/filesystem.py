@@ -8,7 +8,19 @@ import threading
 from pathlib import Path
 from typing import Dict, Any, Optional, List
 
-from fuse import FUSE, FuseOSError, Operations
+try:
+    from fuse import FUSE, FuseOSError, Operations
+except ImportError:
+    # Create dummy classes for when FUSE is not available
+    class FuseOSError(Exception):
+        def __init__(self, errno):
+            self.errno = errno
+            super().__init__(f"FUSE error: {errno}")
+    
+    class Operations:
+        pass
+    
+    FUSE = None
 
 from .logging_config import get_logger
 from .sync_manager import SyncManager
@@ -55,31 +67,11 @@ class ShareBoxFS(Operations):
     def getattr(self, path, fh=None):
         """Get file attributes."""
         try:
-            cache_path = self._get_cache_path(path)
-            
-            # Check if file exists in cache
-            if os.path.exists(cache_path):
-                st = os.lstat(cache_path)
-                return dict((key, getattr(st, key)) for key in (
-                    'st_atime', 'st_ctime', 'st_gid', 'st_mode', 'st_mtime',
-                    'st_nlink', 'st_size', 'st_uid'
-                ))
-            
-            # Check if file exists in remote storage
-            if self.sync_manager.file_exists_remote(path):
-                # File exists remotely but not in cache - download it
-                if self.sync_manager.download_file(path):
-                    if os.path.exists(cache_path):
-                        st = os.lstat(cache_path)
-                        return dict((key, getattr(st, key)) for key in (
-                            'st_atime', 'st_ctime', 'st_gid', 'st_mode', 'st_mtime',
-                            'st_nlink', 'st_size', 'st_uid'
-                        ))
-                
-                # If download failed, return default file attributes
+            # Handle root directory specially
+            if path == '/':
                 return {
-                    'st_mode': stat.S_IFREG | 0o644,
-                    'st_nlink': 1,
+                    'st_mode': stat.S_IFDIR | 0o755,
+                    'st_nlink': 2,
                     'st_size': 0,
                     'st_ctime': time.time(),
                     'st_mtime': time.time(),
@@ -88,9 +80,52 @@ class ShareBoxFS(Operations):
                     'st_gid': os.getgid()
                 }
             
+            cache_path = self._get_cache_path(path)
+            
+            # Check if file exists in cache
+            if os.path.exists(cache_path):
+                try:
+                    st = os.lstat(cache_path)
+                    return dict((key, getattr(st, key)) for key in (
+                        'st_atime', 'st_ctime', 'st_gid', 'st_mode', 'st_mtime',
+                        'st_nlink', 'st_size', 'st_uid'
+                    ))
+                except OSError as e:
+                    logger.warning(f"Failed to stat cache file {cache_path}: {e}")
+                    # Fall through to check remote
+            
+            # Check if file exists in remote storage
+            try:
+                if self.sync_manager.file_exists_remote(path):
+                    # File exists remotely but not in cache - download it
+                    if self.sync_manager.download_file(path):
+                        if os.path.exists(cache_path):
+                            st = os.lstat(cache_path)
+                            return dict((key, getattr(st, key)) for key in (
+                                'st_atime', 'st_ctime', 'st_gid', 'st_mode', 'st_mtime',
+                                'st_nlink', 'st_size', 'st_uid'
+                            ))
+                    
+                    # If download failed, return default file attributes
+                    return {
+                        'st_mode': stat.S_IFREG | 0o644,
+                        'st_nlink': 1,
+                        'st_size': 0,
+                        'st_ctime': time.time(),
+                        'st_mtime': time.time(),
+                        'st_atime': time.time(),
+                        'st_uid': os.getuid(),
+                        'st_gid': os.getgid()
+                    }
+            except Exception as e:
+                logger.warning(f"Failed to check remote file {path}: {e}")
+            
             # File doesn't exist
             raise FuseOSError(errno.ENOENT)
             
+        except FuseOSError:
+            # Re-raise FUSE errors
+            raise
         except Exception as e:
             logger.error(f"Error getting attributes for {path}: {e}")
             raise FuseOSError(errno.EIO)

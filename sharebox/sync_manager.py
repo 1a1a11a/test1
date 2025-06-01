@@ -17,7 +17,6 @@ from watchdog.events import FileSystemEventHandler
 
 from .logging_config import get_logger
 from .r2_client import R2Client
-from .encryption import EncryptionManager
 
 
 logger = get_logger(__name__)
@@ -92,7 +91,12 @@ class SyncManager:
         # Encryption
         encryption_config = config.get('encryption', {})
         if encryption_config.get('enabled', False):
-            self.encryption = EncryptionManager(encryption_config)
+            try:
+                from .encryption import EncryptionManager
+                self.encryption = EncryptionManager(encryption_config)
+            except ImportError as e:
+                logger.warning(f"Encryption not available: {e}")
+                self.encryption = None
         else:
             self.encryption = None
         
@@ -176,26 +180,54 @@ class SyncManager:
     def _process_sync_queue(self):
         """Process sync operations from queue."""
         try:
-            # Get operation with timeout
-            operation = self.sync_queue.get(timeout=1)
+            # Get operation with timeout - this returns (priority, operation)
+            queue_item = self.sync_queue.get(timeout=1)
+            
+            # Extract the actual operation from the tuple
+            if isinstance(queue_item, tuple):
+                priority, operation = queue_item
+            else:
+                # Fallback for backwards compatibility
+                operation = queue_item
+            
+            # Validate operation object
+            if not hasattr(operation, 'operation') or not hasattr(operation, 'path'):
+                logger.error(f"Invalid operation object: {operation}")
+                self.sync_queue.task_done()
+                return
             
             with self.sync_lock:
                 try:
+                    logger.debug(f"Processing sync operation: {operation.operation} for {operation.path}")
+                    
                     if operation.operation == 'upload':
                         self._upload_file(operation.path)
                     elif operation.operation == 'download':
                         self._download_file(operation.path)
                     elif operation.operation == 'delete':
                         self._delete_file(operation.path)
+                    else:
+                        logger.warning(f"Unknown sync operation: {operation.operation}")
                     
                     self.sync_queue.task_done()
                     
                 except Exception as e:
                     logger.error(f"Error processing sync operation {operation.operation} for {operation.path}: {e}")
+                    import traceback
+                    logger.debug(f"Sync error traceback: {traceback.format_exc()}")
                     self.sync_queue.task_done()
                     
         except queue.Empty:
             pass
+        except Exception as e:
+            logger.error(f"Unexpected error in sync queue processing: {e}")
+            import traceback
+            logger.debug(f"Sync queue error traceback: {traceback.format_exc()}")
+            # Try to clean up the queue item if possible
+            try:
+                self.sync_queue.task_done()
+            except:
+                pass
     
     def queue_upload(self, path: str, priority: int = 0):
         """Queue file for upload.

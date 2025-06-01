@@ -8,7 +8,10 @@ import threading
 from pathlib import Path
 from typing import Optional
 
-from fuse import FUSE
+try:
+    from fuse import FUSE
+except ImportError:
+    FUSE = None
 
 from .config import Config
 from .logging_config import setup_logging, get_logger
@@ -127,6 +130,11 @@ class ShareBoxApp:
             
             logger.info(f"Mounting ShareBox at: {mount_point}")
             
+            # Check if FUSE is available
+            if FUSE is None:
+                logger.error("FUSE is not available. Please install python-fuse.")
+                return False
+            
             # Mount filesystem
             self.fuse = FUSE(
                 self.filesystem,
@@ -156,6 +164,10 @@ class ShareBoxApp:
         mount_point = os.path.expanduser(mount_point)
         
         try:
+            # Stop sync manager first
+            if self.sync_manager:
+                self.sync_manager.stop()
+            
             # Try fusermount first
             import subprocess
             result = subprocess.run(['fusermount', '-u', mount_point], 
@@ -165,6 +177,13 @@ class ShareBoxApp:
                 logger.info(f"Unmounted ShareBox from: {mount_point}")
                 return True
             else:
+                # Try fusermount with lazy unmount
+                result = subprocess.run(['fusermount', '-uz', mount_point], 
+                                      capture_output=True, text=True)
+                if result.returncode == 0:
+                    logger.info(f"Lazy unmounted ShareBox from: {mount_point}")
+                    return True
+                
                 # Try umount as fallback
                 result = subprocess.run(['umount', mount_point], 
                                       capture_output=True, text=True)
@@ -172,8 +191,15 @@ class ShareBoxApp:
                     logger.info(f"Unmounted ShareBox from: {mount_point}")
                     return True
                 else:
-                    logger.error(f"Failed to unmount: {result.stderr}")
-                    return False
+                    # Try lazy umount
+                    result = subprocess.run(['umount', '-l', mount_point], 
+                                          capture_output=True, text=True)
+                    if result.returncode == 0:
+                        logger.info(f"Lazy unmounted ShareBox from: {mount_point}")
+                        return True
+                    else:
+                        logger.error(f"Failed to unmount: {result.stderr}")
+                        return False
                     
         except Exception as e:
             logger.error(f"Failed to unmount ShareBox: {e}")
