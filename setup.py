@@ -1,0 +1,25 @@
+from setuptools import setup, find_packages
+
+setup(
+    name="sharebox",
+    version="1.0.0",
+    description="Dropbox-like File Sync with R2 Storage",
+    packages=find_packages(),
+    install_requires=[
+        "fusepy==3.0.1",
+        "boto3==1.34.34",
+        "watchdog==3.0.0",
+        "click==8.1.7",
+        "cryptography==41.0.8",
+        "python-dateutil==2.8.2",
+        "requests==2.31.0",
+        "pyyaml==6.0.1",
+        "colorlog==6.8.0",
+    ],
+    entry_points={
+        "console_scripts": [
+            "sharebox=sharebox.cli:main",
+        ],
+    },
+    python_requires=">=3.8",
+) 

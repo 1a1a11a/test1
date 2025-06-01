@@ -1,0 +1,43 @@
+# ShareBox Configuration Example
+# Copy this file to config.yaml and update with your credentials
+
+# Cloudflare R2 Storage Configuration
+r2:
+  access_key_id: "your-r2-access-key-id"
+  secret_access_key: "your-r2-secret-access-key"
+  endpoint_url: "https://your-account-id.r2.cloudflarestorage.com"
+  bucket_name: "your-sharebox-bucket"
+  region: "auto"
+
+# Synchronization Settings
+sync:
+  local_cache_dir: "~/.sharebox/cache"
+  mount_point: "~/ShareBox"
+  sync_interval: 30  # seconds between sync checks
+  max_file_size: 1073741824  # 1GB max file size
+  excluded_patterns:
+    - "*.tmp"
+    - "*.swp"
+    - ".DS_Store"
+    - "Thumbs.db"
+    - "~*"
+
+# Encryption Settings (optional)
+encryption:
+  enabled: false
+  password: ""  # Leave empty to prompt during startup
+  algorithm: "AES-256-GCM"
+
+# Application Settings
+app:
+  log_level: "INFO"  # DEBUG, INFO, WARNING, ERROR
+  log_file: "~/.sharebox/logs/sharebox.log"
+  pid_file: "~/.sharebox/sharebox.pid"
+  device_name: ""  # Leave empty to auto-generate from hostname
+
+# FUSE Settings
+fuse:
+  allow_other: false
+  allow_root: false
+  default_permissions: true
+  foreground: false  # Set to true for debugging 
